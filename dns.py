@@ -23,7 +23,7 @@ historyLog = baseDir + "DNS_history.txt"
 errorLog = baseDir + "DNS_error.txt"
 debugLog = baseDir + "DNS_debug.txt"
 
-blockFile = "../block.csv"
+blockFile = "./block.csv"
 blockFileTimeStamp = os.stat(blockFile).st_mtime
 
 def history(entry):
