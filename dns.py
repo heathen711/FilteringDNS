@@ -10,27 +10,28 @@ import os
 import datetime
 import string
 
-debug = True
+HOST, PORT = "", 53
 
-HOST, PORT = "192.168.7.19", 8053
+externalDNS = "8.8.8.8"
+routerIP = "192.168.7.1"
+
+logDir = "/share/homes/admin/DNSlogs/"
+
+historyLog = logDir + "history.txt"
+errorLog = logDir + "error.txt"
+debugLog = logDir + "debug.txt"
+
+blockFile = "/share/Programming/DNS/block.csv"
+blockFileTimeStamp = os.stat(blockFile).st_mtime
 
 cache = []
 cacheMax = 1000
-
-baseDir = "/home/pi/logs/"
-
-historyLog = baseDir + "DNS_history.txt"
-errorLog = baseDir + "DNS_error.txt"
-debugLog = baseDir + "DNS_debug.txt"
-
-blockFile = "./block.csv"
-blockFileTimeStamp = os.stat(blockFile).st_mtime
 
 def history(entry):
     logFile = open(historyLog, "a")
     logFile.write(str(datetime.datetime.now()) + " " + entry + "\n")
     logFile.close()
-    
+
 def error_log(entry):
     logFile = open(errorLog, "a")
     logFile.write(str(datetime.datetime.now()) + " " + entry + "\n")
@@ -43,21 +44,24 @@ def debug_log(entry):
 
 class MyUDPHandler(SocketServer.BaseRequestHandler):
     def handle(self):
+        if self.client_address[0] in blocked:
+            return 0
+        client = ""
+        if self.client_address[0].startswith("192.168.7."):
+            client = "Local"
+        elif self.client_address[0].startswith("10.8.0."):
+            client = "VPN"
+        else:
+            blocked.append(self.client_address[0])
+            print self.client_address[0]
+            return 0
+        start = time.time()
         data = self.request[0]
         socket = self.request[1]
         if len(data) > 0:
-            client = "New"
-            if self.client_address[0].startswith("166."):
-                client = "AT&T Network"
-            elif self.client_address[0].startswith("76."):
-                client = "TWC - 6944"
-            elif self.client_address[0].startswith("172."):
-                client = "TWC - 9650"
-            elif self.client_address[0].startswith("66."):
-                client = "Sprint "
             result = DNS(data, self.client_address)
             socket.sendto(result.getPacket(), self.client_address)
-            history(client + " " + str(self.client_address[0]) + " -> " + str(result.getDomain()) + " -> " + str(result.getIP()))
+            history(client + " " + str(time.time()-start) + " seconds " + str(self.client_address[0]) + " -> " + str(result.getDomain()) + " -> " + str(result.getIP()))
         else:
            print "No data..."
         global cache
@@ -66,23 +70,25 @@ class MyUDPHandler(SocketServer.BaseRequestHandler):
                 cache.pop(0)
 
 def readInBlock():
-    if debug:
-        debug_log("Reading in block file...")
+    history_log("Reading in block file...")
     global blockFileTimeStamp
     blockFileTimeStamp = os.stat(blockFile).st_mtime
     try:
         block = []
         inFile = file(blockFile, "r")
-        data = inFile.readline()
-        block = data.split(",\r")
+        data = inFile.read()
+        data = data.replace('\n', '')
+        data = data.replace('\r', '')
+        block = data.split(",")
         block.pop(len(block)-1)
         inFile.close()
+        debug_log(str(block))
         return block
     except:
         print "Error reading in block CSV!"
         error_log("Error Reading in block CSV!")
         sys.exit(1)
-    
+
 def writeOutBlock(block):
     outFile = file(blockFile, "w")
     for entry in block:
@@ -91,7 +97,7 @@ def writeOutBlock(block):
 
 class DNS:
     def askGoogle(self):
-        UDP_IP = "8.8.8.8"
+        UDP_IP = externalDNS
         UDP_PORT = 53
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -103,7 +109,21 @@ class DNS:
             self.ip = [ "127.0.0.1" ]
             self.failed = True
             return False
-            
+
+    def askRouter(self):
+        UDP_IP = routerIP
+        UDP_PORT = 53
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            temp = sock.sendto(self.data, (UDP_IP, UDP_PORT))
+            self.packet, addr = sock.recvfrom(1024)
+            self.google = True
+            return True
+        except:
+            self.ip = [ "127.0.0.1" ]
+            self.failed = True
+            return False
+
     def cacheSearch(self, domain):
         global cache
         if len(cache) < 2:
@@ -126,19 +146,19 @@ class DNS:
                 high = mid - 1
             mid = (low + high) / 2
         return False
-            
+
     def addToCache(self):
         if self.domain not in doNotCache:
             self.expiration = time.time() + (3*60*60) # add 3 hours in seconds
             cache.append([ self.domain, self.ip, self.expiration ])
             cache.sort()
-            
+
     def notToCache(self):
         for entry in doNotCache:
             if entry in self.domain or self.domain in entry:
                 return True
         return False
-        
+
     def redirectSearch(self):
         found = False
         for entry in redirects:
@@ -146,7 +166,7 @@ class DNS:
                 self.ip = [ entry[1] ]
                 found = True
         return found
-            
+
     def buildPacket(self):
         self.packet = self.data[0:2] + '\x80\x00' + self.data[4:6] + '\x00' + chr(len(self.ip)) + "\x00\x00\x00\x00" + self.data[12:]
         if not self.failed:
@@ -166,7 +186,7 @@ class DNS:
                         error_log(self.ID + self.domain + ' -> ' + str(self.ip))
                         self.askGoogle()
                         break
-    
+
     def DNSQuery(self):
         if "\x07version\x04bind" in self.data.lower():
             self.ip = [ ]
@@ -185,54 +205,19 @@ class DNS:
                 error_log(self.ID + "Error processing domain name from " + str(self.data))
                 self.askGoogle()
                 self.failed = True
-            
+
             if not self.failed:
                 if blockFileTimeStamp != os.stat(blockFile).st_mtime:
                     global block
                     block = readInBlock()
                 if self.domain.endswith("arpa"):
-                    #debug_log(self.ID +  " Arpa:" + self.domain)
-                    #lb._dns-sd._udp.0.20.168.192.in-addr.arpa
-                    
-                    tempIp = self.domain.split('.')
-                    for slot in range(len(tempIp)-1, -1, -1):
-                        if not tempIp[slot].isdigit():
-                            tempIp.pop(slot)
-                    if len(tempIp) > 0:        
-                        while len(tempIp) < 4:
-                            tempIp.insert(0,'0')
-                        tempIp = '.'.join([ tempIp[-1], tempIp[-2], tempIp[-3], tempIp[-4] ])
-                        debug_log(self.ID + "tempIp: " + str(tempIp))
-                        self.ip = [ tempIp ]
-                        
-                        if self.ip[0] != "0.0.0.0":
-                            try:
-                                #socket.gethostbyaddr("31.13.77.6")
-                                #('edge-star-shv-01-sjc2.facebook.com', ['6.77.13.31.in-addr.arpa'], ['31.13.77.6'])
-                                self.result = socket.gethostbyaddr(tempIp)
-                            except:
-                                error_log(self.ID + "Reverse DNS lookup failed for: " + str(tempIp))
-                                debug_log(self.ID + "Reverse DNS lookup failed for: " + str(tempIp) + ' ' + str(sys.exc_info()[0]))
-                                self.failed = True
-
-                            if not self.failed:
-                                self.result = self.result[0]
-                                debug_log(self.ID + str(self.ip) + " -> " + str(self.result))
-                                self.reverseLookUp = True
-                        else:
-                            self.failed = True
-                    else:
-                        self.ip = []
-                #elif "playstation" in self.domain or "sony" in self.domain:
-                    #self.ip = socket.gethostbyname("h711.webhop.me")
+                    self.ip = []
+                elif self.domain.endswith(".local"):
+                    self.askRouter()
                 elif self.domain == "127.0.0.1":
                     self.ip = [ "127.0.0.1" ]
                 elif self.domain == "local":
                     self.ip = [ self.askingIP[0] ]
-                elif self.domain == "mg1.pw":
-                    command = "echo kekoa711 | sudo -S -p \"\" ipfw add 5000 deny ip from " + self.askingIP[0] + " to me"
-                    os.popen(command)
-                    self.ip = [ "127.0.0.1" ]
                 elif self.domain in block:
                     self.ip = [ "127.0.0.1" ]
                 elif self.notToCache():
@@ -252,13 +237,13 @@ class DNS:
                             error_log(self.ID + "No IP found for " + self.domain)
                             self.ip = []
                             self.failed = True
-                                
+
         if not self.google:
             self.buildPacket()
-    
+
     def getPacket(self):
         return self.packet
-    
+
     def getIP(self):
         if self.failed:
             return "Unknown"
@@ -272,10 +257,10 @@ class DNS:
             return "Blocked"
         else:
             return str(self.ip)
-        
+
     def getDomain(self):
         return self.domain
-        
+
     def __init__(self, data, askingIP):
         self.data = data
         self.ID = askingIP[0] + ':' + str(askingIP[1]) + ' '
@@ -287,11 +272,10 @@ class DNS:
         self.failed = False
         self.cache = False
         self.reverseLookUp = False
-        
+
         self.DNSQuery()
-        
+
 def udpServer():
-    global server
     server = SocketServer.UDPServer((HOST, PORT), MyUDPHandler)
     while 1:
         try:
@@ -299,10 +283,6 @@ def udpServer():
         except:
             error_log("Error starting UDP server.")
             time.sleep(1)
-    
-def udpServerThread():
-    udpServerHandler = threading.Thread(target = udpServer)
-    udpServerHandler.start()
 
 def cacheSweeper():
     cacheCleanRate = 1 #one second until in sync with clock
@@ -320,63 +300,32 @@ def cacheSweeper():
             #debug_log("Done cleaning cache.")
         time.sleep(cacheCleanRate)
         cacheCleanRate = 1
-        
+
 def cacheSweeperThread():
     cacheSweeperHandler = threading.Thread(target = cacheSweeper)
     cacheSweeperHandler.start()
-    
+
 if __name__ == "__main__":
     global run
     run = True
     global block
     block = readInBlock()
     global doNotCache
-    doNotCache = [ "miniclippt.com", "heaven.webhop.me" ]
+    doNotCache = [ "miniclippt.com" ]
     global redirects
     redirects = [ ["vvm.mobile.att.net", "166.216.150.131"] ]
     print "Blocked sites loaded."
-    udpServerThread()
-    global server
     cacheSweeperThread()
-    while True:
-        try:
-            print "Menu:"
-            print "1 - add a domain to block"
-            print "2 - remove a domain from block"
-            print "3 - shutdown"
-            choice = raw_input("Choice: ")
-            if choice.isdigit():
-                choice = int(choice)
-                if choice == 1:
-                    domain = raw_input("Enter in domain or [Q]uit: ")
-                    if domain.lower() != "quit":
-                        block.append(domain)
-                        block.sort()
-                        writeOutBlock(block)
-                elif choice == 2:
-                    domain = raw_input("Enter in domain or [Q]uit: ")
-                    if domain.lower() != "quit":
-                        if domain in block:
-                            block.pop(block.index(domain))
-                        writeOutBlock(block)
-                elif choice == 3:
-                    server.shutdown()
-                    break
-                else:
-                    print "Invalid option"
-            else:
-                print "Invalid option"
-            print ""
-        except KeyboardInterrupt:
-            server.shutdown()
-            sys.exit(3)
+    print "Cache sweeper started..."
+    print "Starting UDP server..."
+    udpServer()
     
-    
+
 ## Packet Structure
-                            
+
         ## Query ID for this transaction
         #QID = self.data[0:2]
-        
+
         ## Bit-wise indicators
         #bits = ''
         ## 1 bit = Query (0) / Response Flag (1)
@@ -399,31 +348,31 @@ if __name__ == "__main__":
             ##   5: refused, 6: domain should not exist, 7: resource should not exist
             ##   8: missing resource record, 9: not auth for DNS, 10: not auth for Zone ]
         #bits += '0000'
-        
+
         #0x81 = 1000 0001
         #0x80 = 1000 0000
-        
+
         #BitWise = chr(int(bits[0:8],2)) + chr(int(bits[9:], 2))
         #BitWise = '\x80\x00'
-        
+
         ## Total asked and answered
         #QueryCount = self.data[4:6]
         #ResponseCount = '\x00' + chr(len(self.ip))
         #AuthorityCount = "\x00\x00"
         #AddlRecordsCount = "\x00\x00"
-        
+
         ## What was originally asked for
         #OrigQuery = self.data[12:]
-        
+
         ## 0001 0001 0000 01FD 0004 11 8E A0 3B
-        
+
         ## Type of response = [ 1:a host address, 2:an authoritative name server, 12:host ptr, 15:mail exchange ] (Not all but common ones)
         #ResponseQType = '\x00\x01'
-        
+
         ## Query Class, can be anything really
         #QClass = '\x00\x01'
-        
+
         ## TTL (Time To Live)
         #TTL = '\x00\x00\x00\x3c'
-        
+
         #MX_Priority = '\x00\x04'
