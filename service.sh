@@ -1,1 +1,2 @@
-screen -dmS DNS -m bash "/share/Programming/DNS/run.sh"
+screen -dmS DNS /share/Programming/DNS/run.sh
+

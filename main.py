@@ -70,7 +70,7 @@ class MyUDPHandler(SocketServer.BaseRequestHandler):
                 cache.pop(0)
 
 def readInBlock():
-    history_log("Reading in block file...")
+    history("Reading in block file...")
     global blockFileTimeStamp
     blockFileTimeStamp = os.stat(blockFile).st_mtime
     try:
